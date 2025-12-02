@@ -91,7 +91,28 @@ def fetch_latest_github_release(repo: str, timeout: float = 5.0) -> Optional[dic
                 'assets': data.get('assets', [])
             }
     except urllib.error.HTTPError as e:
-        logging.debug(f'GitHub API HTTPError: {e.code} {e.reason}')
+        # Если нет релизов (404) — попробуем как fallback взять последний тег из /tags
+        logging.debug(f'GitHub API HTTPError (releases): {e.code} {e.reason}')
+        if e.code == 404:
+            try:
+                tags_api = f'https://api.github.com/repos/{repo}/tags'
+                reqt = urllib.request.Request(tags_api, headers=headers)
+                with urllib.request.urlopen(reqt, timeout=timeout) as tr:
+                    rawt = tr.read()
+                    tags = json.loads(rawt.decode('utf-8'))
+                    if isinstance(tags, list) and tags:
+                        top = tags[0]
+                        tname = top.get('name') or top.get('ref')
+                        # construct a minimal release-like dict
+                        return {
+                            'tag_name': tname,
+                            'html_url': f'https://github.com/{repo}/releases' ,
+                            'name': tname,
+                            'body': None,
+                            'assets': []
+                        }
+            except Exception:
+                logging.debug('Fallback to tags failed')
         return None
     except Exception as e:
         logging.debug(f'Ошибка при обращении к GitHub API: {e}')
@@ -2398,7 +2419,7 @@ class MainWindow(QMainWindow):
         adv = QGroupBox('Темы')
         advl = QVBoxLayout(adv)
         advl.setContentsMargins(8,8,8,8)
-        advl.addWidget(QLabel('Доступные темы:\n\n• Классическая - фиолетово-синий\n• Темная - серые тона (Dark Mode)\n• Океан - морские оттенки\n• Закат - розово-красный\n• Лес - зеленые тона\n• Фиолетовый сон - фиолетовый\n• Зима - снежинки и морозная анимация'))
+        advl.addWidget(QLabel('Доступные темы: соси хуй твар ебаная маму ебал твою \n\n• Классическая - фиолетово-синий\n• Темная - серые тона (Dark Mode)\n• Океан - морские оттенки\n• Закат - розово-красный\n• Лес - зеленые тона\n• Фиолетовый сон - фиолетовый\n• Зима - снежинки и морозная анимация'))
         right_v.addWidget(adv)
         right_v.addStretch()
 
@@ -3037,25 +3058,58 @@ class MainWindow(QMainWindow):
             with open('theme.txt', 'w') as f: f.write(n)
         except: pass
 
+    def _style_dialog(self, dlg):
+        """Apply current app theme to a dialog (QMessageBox/QProgressDialog).
+
+        This attempts to use the same card/background color as the app theme so
+        dialogs are readable (white text on dark background) instead of the
+        default white-on-white in some Windows themes.
+        """
+        try:
+            t = THEMES.get(getattr(self, 'theme', 'Классическая'), THEMES['Классическая'])
+            # t['b'] stored as rgba string in themes — use it for dialog background
+            bg = t.get('b', 'rgba(30,30,45,0.85)')
+            accent = ACCENT
+            dlg.setStyleSheet(f"""
+                QWidget {{ background-color: {bg}; color: white; border-radius: 12px; }}
+                QLabel {{ color: white; }}
+                QPushButton {{ background-color: rgba(255,255,255,0.06); color: white; border-radius: 8px; padding: 6px 12px; }}
+                QProgressBar {{ background-color: rgba(255,255,255,0.06); color: white; border-radius: 8px; height: 14px; }}
+                QProgressDialog QLabel {{ color: white; }}
+            """)
+        except Exception:
+            # Best-effort only; do not raise
+            pass
+
     def show_update_check(self):
         """Проверить наличие обновления на GitHub Releases и показать результат.
 
         Если `GITHUB_REPO` не настроен (placeholder), покажем подсказку.
         """
         try:
-            # предупредим, если репозиторий — placeholder
-            repo = getattr(self, 'github_repo', GITHUB_REPO)
+            # используем instance repo, а если он некорректен — пробуем глобальную константу
+            repo = getattr(self, 'github_repo', None)
             if not repo or repo.startswith('yourusername') or repo.startswith('your-') or '/' not in repo:
-                QMessageBox.information(self, 'Проверка обновлений',
-                                        'GitHub репозиторий для авто-проверки не настроен\n'
-                                        'Установите константу GITHUB_REPO в начале файла (формат owner/repo).')
-                # всё ещё покажем демонстрационный сплэш
-                try:
-                    splash = PreloadSplash(parent=self, theme_name=self.theme)
-                    splash.exec()
-                except Exception:
-                    logging.exception('Ошибка отображения демонстрационного сплэша')
-                return
+                # fallback to global repo constant if present
+                fallback = GITHUB_REPO if GITHUB_REPO and '/' in GITHUB_REPO and not GITHUB_REPO.startswith('yourusername') and not GITHUB_REPO.startswith('your-') else None
+                if fallback:
+                    repo = fallback
+                else:
+                    msg = QMessageBox(self)
+                    msg.setWindowTitle('Проверка обновлений')
+                    msg.setText('GitHub репозиторий для авто-проверки не настроен')
+                    msg.setInformativeText('Установите константу GITHUB_REPO в начале файла (формат owner/repo).')
+                    msg.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                    try: self._style_dialog(msg)
+                    except: pass
+                    msg.exec()
+                    # всё ещё покажем демонстрационный сплэш
+                    try:
+                        splash = PreloadSplash(parent=self, theme_name=self.theme)
+                        splash.exec()
+                    except Exception:
+                        logging.exception('Ошибка отображения демонстрационного сплэша')
+                    return
 
             # Показываем прогресс-диалог и запускаем фоновую проверку
             progress = QProgressDialog('Проверка обновлений на GitHub...', 'Отмена', 0, 0, self)
@@ -3063,6 +3117,11 @@ class MainWindow(QMainWindow):
             progress.setWindowTitle('Проверка обновлений')
             progress.setCancelButtonText('Отмена')
             progress.show()
+
+            try:
+                self._style_dialog(progress)
+            except Exception:
+                pass
 
             def on_done(res: dict):
                 try:
@@ -3072,26 +3131,163 @@ class MainWindow(QMainWindow):
                     pass
 
                 if not res.get('ok') or not res.get('release'):
-                    QMessageBox.information(self, 'Проверка обновлений', 'Не удалось получить информацию о релизах. Проверьте интернет или конфигурацию.')
+                    msg = QMessageBox(self)
+                    msg.setWindowTitle('Проверка обновлений')
+                    msg.setText('Не удалось получить информацию о релизах')
+                    msg.setInformativeText('Проверьте интернет или конфигурацию.')
+                    msg.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                    try: self._style_dialog(msg)
+                    except: pass
+                    msg.exec()
                     return
-
-                rel = res['release']
-                tag = rel.get('tag_name')
-                url = rel.get('html_url')
-                readable = rel.get('name') or tag or 'Новый релиз'
-
-                cmp = compare_versions(APP_VERSION, _normalize_tag(tag))
-                if cmp < 0:
-                    # найдена новая версия
-                    txt = f'Найдена новая версия: {tag}\n\nТекущая: {APP_VERSION}\nРелиз: {readable}\n\nОткрыть страницу релиза?'
-                    buttons = QMessageBox.Question
-                    choice = QMessageBox.question(self, 'Доступно обновление', txt, QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel)
-                    if choice == QMessageBox.StandardButton.Open and url:
-                        webbrowser.open(url)
-                elif cmp == 0:
-                    QMessageBox.information(self, 'Проверка обновлений', f'У вас последняя версия ({APP_VERSION}).')
                 else:
-                    QMessageBox.information(self, 'Проверка обновлений', f'Установлена бета/необычная версия ({APP_VERSION}). GitHub latest: {tag}')
+                    rel = res['release']
+                    tag = rel.get('tag_name')
+                    url = rel.get('html_url')
+                    readable = rel.get('name') or tag or 'Новый релиз'
+
+                    cmp = compare_versions(APP_VERSION, _normalize_tag(tag))
+                    if cmp < 0:
+                        txt = f'Найдена новая версия: {tag}\n\nТекущая: {APP_VERSION}\nРелиз: {readable}\n\nОткрыть страницу релиза?'
+                        m = QMessageBox(self)
+                        m.setWindowTitle('Доступно обновление')
+                        m.setText(txt)
+                        open_btn = m.addButton('Открыть', QMessageBox.ButtonRole.ActionRole)
+                        cancel_btn = m.addButton('Отмена', QMessageBox.ButtonRole.RejectRole)
+                        try: self._style_dialog(m)
+                        except: pass
+                        m.exec()
+                        if m.clickedButton() is open_btn and url:
+                            webbrowser.open(url)
+                    elif cmp == 0:
+                        m = QMessageBox(self)
+                        m.setWindowTitle('Проверка обновлений')
+                        m.setText(f'У вас последняя версия ({APP_VERSION}).')
+                        m.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                        try: self._style_dialog(m)
+                        except: pass
+                        m.exec()
+                    else:
+                        m = QMessageBox(self)
+                        m.setWindowTitle('Проверка обновлений')
+                        m.setText(f'Установлена бета/необычная версия ({APP_VERSION}). GitHub latest: {tag}')
+                        m.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                        try: self._style_dialog(m)
+                        except: pass
+                        m.exec()
+
+                # После проверки релиза — всегда проверяем содержимое файла youtube_uploader.py в репозитории
+                try:
+                    file_path = 'youtube_uploader.py'
+
+                    def on_file_done(fr: dict):
+                        try:
+                            if not fr.get('ok') or not fr.get('file'):
+                                # если не удалось получить file — молча возвращаемся
+                                return
+                            remote = fr['file']
+                            remote_content = remote.get('content', '')
+                            # Read local file (this module's file)
+                            try:
+                                local_fn = os.path.abspath(__file__)
+                                with open(local_fn, 'r', encoding='utf-8') as f:
+                                    local_content = f.read()
+                            except Exception:
+                                # fallback — try working dir
+                                try:
+                                    with open(file_path, 'r', encoding='utf-8') as f:
+                                        local_content = f.read()
+                                except Exception:
+                                    return
+
+                            # Normalize newlines
+                            rc = remote_content.replace('\r\n', '\n')
+                            lc = local_content.replace('\r\n', '\n')
+
+                            if rc != lc:
+                                # файл отличается — предлагаем открыть страницу на GitHub, заменить локальную копию или отменить
+                                try:
+                                    txt = 'Файл youtube_uploader.py на GitHub отличается от локальной версии.'
+                                    msg = QMessageBox(self)
+                                    msg.setWindowTitle('Файл обновлён')
+                                    msg.setText(txt)
+                                    msg.setInformativeText('Открыть страницу, скачать и заменить локальную копию или отменить?')
+                                    open_btn = msg.addButton('Открыть', QMessageBox.ButtonRole.ActionRole)
+                                    replace_btn = msg.addButton('Заменить локально', QMessageBox.ButtonRole.AcceptRole)
+                                    cancel_btn = msg.addButton('Отмена', QMessageBox.ButtonRole.RejectRole)
+                                    try: self._style_dialog(msg)
+                                    except: pass
+                                    msg.exec()
+
+                                    clicked = msg.clickedButton()
+                                    if clicked is open_btn:
+                                        url = remote.get('download_url') or f'https://github.com/{repo}/blob/main/{file_path}'
+                                        webbrowser.open(url)
+                                    elif clicked is replace_btn:
+                                        # запуск замены в фоне
+                                        try:
+                                            local_fn = os.path.abspath(__file__)
+                                        except Exception:
+                                            local_fn = file_path
+
+                                        # Progress dialog
+                                        progress2 = QProgressDialog('Скачивание и замена файла...', 'Отмена', 0, 0, self)
+                                        try: self._style_dialog(progress2)
+                                        except: pass
+                                        progress2.setWindowModality(Qt.WindowModality.WindowModal)
+                                        progress2.setAutoClose(False)
+                                        progress2.setCancelButtonText('Отмена')
+                                        progress2.show()
+
+                                        def on_done_replace(dr: dict):
+                                            try:
+                                                try:
+                                                    progress2.close()
+                                                except Exception:
+                                                    pass
+                                                if not dr.get('ok'):
+                                                    em = QMessageBox(self)
+                                                    em.setWindowTitle('Ошибка')
+                                                    em.setText(f"Не удалось заменить файл: {dr.get('error')}")
+                                                    em.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                                                    try: self._style_dialog(em)
+                                                    except: pass
+                                                    em.exec()
+                                                else:
+                                                    backup = dr.get('backup')
+                                                    msg_text = 'Файл успешно заменён.'
+                                                    if backup:
+                                                        msg_text += f' Бэкап сохранён: {backup}'
+                                                    msg_text += '\n\nПерезапустите приложение, чтобы изменения вступили в силу.'
+                                                    im = QMessageBox(self)
+                                                    im.setWindowTitle('Готово')
+                                                    im.setText(msg_text)
+                                                    im.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                                                    try: self._style_dialog(im)
+                                                    except: pass
+                                                    im.exec()
+                                            except Exception:
+                                                logging.exception('Ошибка обработки результата замены')
+
+                                        try:
+                                            drt = DownloadReplaceThread(repo, file_path, local_fn, parent=self)
+                                            drt.done.connect(on_done_replace)
+                                            drt.start()
+                                        except Exception:
+                                            progress2.close()
+                                            logging.exception('Не удалось запустить замену файла')
+
+                                except Exception:
+                                    logging.exception('Ошибка показа диалога об отличии файла')
+
+                        except Exception:
+                            logging.exception('Ошибка обработки результата проверки файла')
+
+                    ft = FileCheckThread(repo, 'youtube_uploader.py', parent=self)
+                    ft.done.connect(on_file_done)
+                    ft.start()
+                except Exception:
+                    logging.exception('Не удалось запустить проверку файла на GitHub')
 
             # запускаем в QThread
             try:
@@ -3126,8 +3322,15 @@ class MainWindow(QMainWindow):
                         try:
                             # малое окно: спрашиваем — открыть релиз в браузере?
                             txt = f'Доступна новая версия {tag} (текущая {APP_VERSION}). Открыть страницу релиза?'
-                            choice = QMessageBox.question(self, 'Обновление доступно', txt, QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel)
-                            if choice == QMessageBox.StandardButton.Open and url:
+                            m = QMessageBox(self)
+                            m.setWindowTitle('Обновление доступно')
+                            m.setText(txt)
+                            ob = m.addButton('Открыть', QMessageBox.ButtonRole.ActionRole)
+                            cb = m.addButton('Отмена', QMessageBox.ButtonRole.RejectRole)
+                            try: self._style_dialog(m)
+                            except: pass
+                            m.exec()
+                            if m.clickedButton() is ob and url:
                                 webbrowser.open(url)
                         except Exception:
                             logging.exception('Ошибка показа уведомления об обновлении')
@@ -3178,6 +3381,8 @@ class MainWindow(QMainWindow):
                                 open_btn = msg.addButton('Открыть', QMessageBox.ButtonRole.ActionRole)
                                 replace_btn = msg.addButton('Заменить локально', QMessageBox.ButtonRole.AcceptRole)
                                 cancel_btn = msg.addButton('Отмена', QMessageBox.ButtonRole.RejectRole)
+                                try: self._style_dialog(msg)
+                                except: pass
                                 msg.exec()
 
                                 clicked = msg.clickedButton()
@@ -3193,6 +3398,8 @@ class MainWindow(QMainWindow):
 
                                     # Progress dialog
                                     progress = QProgressDialog('Скачивание и замена файла...', 'Отмена', 0, 0, self)
+                                    try: self._style_dialog(progress)
+                                    except: pass
                                     progress.setWindowModality(Qt.WindowModality.WindowModal)
                                     progress.setAutoClose(False)
                                     progress.setCancelButtonText('Отмена')
@@ -3204,15 +3411,27 @@ class MainWindow(QMainWindow):
                                                 progress.close()
                                             except Exception:
                                                 pass
-                                            if not dr.get('ok'):
-                                                QMessageBox.warning(self, 'Ошибка', f"Не удалось заменить файл: {dr.get('error')}")
-                                            else:
-                                                backup = dr.get('backup')
-                                                msg_text = 'Файл успешно заменён.'
-                                                if backup:
-                                                    msg_text += f' Бэкап сохранён: {backup}'
-                                                msg_text += '\n\nПерезапустите приложение, чтобы изменения вступили в силу.'
-                                                QMessageBox.information(self, 'Готово', msg_text)
+                                                if not dr.get('ok'):
+                                                    em = QMessageBox(self)
+                                                    em.setWindowTitle('Ошибка')
+                                                    em.setText(f"Не удалось заменить файл: {dr.get('error')}")
+                                                    em.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                                                    try: self._style_dialog(em)
+                                                    except: pass
+                                                    em.exec()
+                                                else:
+                                                    backup = dr.get('backup')
+                                                    msg_text = 'Файл успешно заменён.'
+                                                    if backup:
+                                                        msg_text += f' Бэкап сохранён: {backup}'
+                                                    msg_text += '\n\nПерезапустите приложение, чтобы изменения вступили в силу.'
+                                                    im = QMessageBox(self)
+                                                    im.setWindowTitle('Готово')
+                                                    im.setText(msg_text)
+                                                    im.addButton('OK', QMessageBox.ButtonRole.AcceptRole)
+                                                    try: self._style_dialog(im)
+                                                    except: pass
+                                                    im.exec()
                                         except Exception:
                                             logging.exception('Ошибка обработки результата замены')
 
