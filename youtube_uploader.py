@@ -36,6 +36,108 @@ from urllib.parse import urlparse
 MAX_WORKERS = multiprocessing.cpu_count()
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
+GITHUB_REPO = 'Jokissmens/Helper'
+
+# Application version — обновляйте при релизах
+APP_VERSION = '0.4.0'
+
+def _normalize_tag(tag: str) -> str:
+    if not tag:
+        return ''
+    return tag.strip().lstrip('vV')
+
+def compare_versions(a: str, b: str) -> int:
+    """Compare two versions like '0.4.1' (basic semver compare).
+
+    Returns -1 if a < b, 0 if equal, 1 if a > b
+    """
+    def to_tuple(s: str):
+        try:
+            s = _normalize_tag(s)
+            parts = [int(x) if x.isdigit() else 0 for x in s.split('.')]
+            while len(parts) < 3:
+                parts.append(0)
+            return tuple(parts[:3])
+        except Exception:
+            return (0, 0, 0)
+
+    ta = to_tuple(a)
+    tb = to_tuple(b)
+    if ta < tb:
+        return -1
+    if ta > tb:
+        return 1
+    return 0
+
+def fetch_latest_github_release(repo: str, timeout: float = 5.0) -> Optional[dict]:
+    """Get latest release info from GitHub API (simple wrapper)."""
+    if not repo or '/' not in repo:
+        return None
+    api = f'https://api.github.com/repos/{repo}/releases/latest'
+    headers = {
+        'User-Agent': 'Helper-Updater/1.0',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    req = urllib.request.Request(api, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            data = json.loads(raw.decode('utf-8'))
+            return {
+                'tag_name': data.get('tag_name'),
+                'html_url': data.get('html_url'),
+                'name': data.get('name'),
+                'body': data.get('body'),
+                'assets': data.get('assets', [])
+            }
+    except urllib.error.HTTPError as e:
+        logging.debug(f'GitHub API HTTPError: {e.code} {e.reason}')
+        return None
+    except Exception as e:
+        logging.debug(f'Ошибка при обращении к GitHub API: {e}')
+        return None
+
+def fetch_github_file(repo: str, path: str, ref: str = None, timeout: float = 6.0) -> Optional[dict]:
+    """Fetch file content from GitHub repository via contents API.
+
+    Returns dict with keys: 'content' (decoded str), 'sha', 'download_url' or None on error.
+    """
+    if not repo or '/' not in repo:
+        return None
+
+    api = f'https://api.github.com/repos/{repo}/contents/{path}'
+    if ref:
+        api += f'?ref={ref}'
+    headers = {
+        'User-Agent': 'Helper-Updater/1.0',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    req = urllib.request.Request(api, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            data = json.loads(raw.decode('utf-8'))
+            content_b64 = data.get('content')
+            if not content_b64:
+                return None
+            import base64
+            try:
+                decoded = base64.b64decode(content_b64).decode('utf-8', errors='replace')
+            except Exception:
+                decoded = base64.b64decode(content_b64 + '==').decode('utf-8', errors='replace')
+
+            return {
+                'content': decoded,
+                'sha': data.get('sha'),
+                'download_url': data.get('download_url'),
+                'path': data.get('path')
+            }
+    except urllib.error.HTTPError as e:
+        logging.debug(f'GitHub file HTTPError: {e.code} {e.reason}')
+        return None
+    except Exception as e:
+        logging.debug(f'Ошибка при обращении к GitHub contents API: {e}')
+        return None
 # Оптимизация доступа к файлам
 file_lock = Lock()
 
@@ -237,74 +339,6 @@ class MainWindow(QMainWindow):
             logging.error(f"Ошибка настройки расширенного логирования: {e}")
 
 SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
-
-# Попробуйте поддерживать версию в коде — при публикации на GitHub используйте tag/release
-# Пример: 'v0.4.0' или '0.4.0'
-VERSION = '0.4.0'
-
-# GitHub репозиторий для проверки релизов (измените на ваш: 'owner/repo')
-GITHUB_REPO = 'yourusername/your-repo'
-
-def _normalize_tag(tag: str) -> str:
-    """Небольшая нормализация тега релиза: убираем leading `v` и пробелы."""
-    if not tag:
-        return ''
-    return tag.strip().lstrip('vV')
-
-def compare_versions(a: str, b: str) -> int:
-    """Сравнить две версии (basic semantic compare).
-
-    Возвращает: -1 если a < b, 0 если равны, 1 если a > b
-    Поддерживает форматы вроде '0.4.1', '0.4', 'v0.5.0'.
-    Не импортирует внешние зависимости — простая реализация.
-    """
-    def to_tuple(s: str):
-        try:
-            s = _normalize_tag(s)
-            parts = [int(x) for x in s.split('.') if x.isdigit() or x.isnumeric()]
-            while len(parts) < 3:
-                parts.append(0)
-            return tuple(parts[:3])
-        except Exception:
-            return (0,0,0)
-
-    ta = to_tuple(a)
-    tb = to_tuple(b)
-    if ta < tb: return -1
-    if ta > tb: return 1
-    return 0
-
-def fetch_latest_github_release(repo: str, timeout: float = 5.0) -> Optional[dict]:
-    """Получить информацию о latest release через GitHub API.
-
-    Возвращает dict с полями { 'tag_name', 'html_url', 'assets': [...] } или None при ошибке.
-    """
-    if not repo or '/' not in repo:
-        return None
-    api = f'https://api.github.com/repos/{repo}/releases/latest'
-    headers = {
-        'User-Agent': 'Helper-Updater/1.0',
-        'Accept': 'application/vnd.github.v3+json'
-    }
-    req = urllib.request.Request(api, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            data = json.loads(raw.decode('utf-8'))
-            # нормализуем и возвращаем
-            return {
-                'tag_name': data.get('tag_name'),
-                'html_url': data.get('html_url'),
-                'name': data.get('name'),
-                'body': data.get('body'),
-                'assets': data.get('assets', [])
-            }
-    except urllib.error.HTTPError as e:
-        logging.debug(f'GitHub API HTTPError: {e.code} {e.reason}')
-        return None
-    except Exception as e:
-        logging.debug(f'Ошибка при обращении к GitHub API: {e}')
-        return None
 
 # softer default gradient and accent color
 ACCENT = "#A259FF"  # замените на "#3BE8B0" при желании бирюзового акцента
@@ -561,6 +595,86 @@ class ReleaseCheckThread(QThread):
                 self.done.emit({'ok': True, 'release': res, 'error': None})
         except Exception as e:
             self.done.emit({'ok': False, 'release': None, 'error': str(e)})
+
+
+class FileCheckThread(QThread):
+    """Фоновая проверка конкретного файла в репозитории GitHub."""
+    done = pyqtSignal(dict)
+
+    def __init__(self, repo: str, path: str, parent=None, ref: str | None = None, timeout: float = 6.0):
+        super().__init__(parent)
+        self.repo = repo
+        self.path = path
+        self.ref = ref
+        self.timeout = timeout
+
+    def run(self):
+        try:
+            res = fetch_github_file(self.repo, self.path, ref=self.ref, timeout=self.timeout)
+            if res is None:
+                self.done.emit({'ok': False, 'file': None, 'error': 'Не удалось получить содержимое файла.'})
+            else:
+                self.done.emit({'ok': True, 'file': res, 'error': None})
+        except Exception as e:
+            self.done.emit({'ok': False, 'file': None, 'error': str(e)})
+
+
+class DownloadReplaceThread(QThread):
+    """Скачивает файл из репозитория и заменяет локальную копию атомарно, делая backup."""
+    done = pyqtSignal(dict)
+
+    def __init__(self, repo: str, path: str, local_path: str, parent=None, timeout: float = 10.0):
+        super().__init__(parent)
+        self.repo = repo
+        self.path = path
+        self.local_path = local_path
+        self.timeout = timeout
+
+    def run(self):
+        try:
+            res = fetch_github_file(self.repo, self.path, timeout=self.timeout)
+            if not res or not res.get('content'):
+                self.done.emit({'ok': False, 'backup': None, 'error': 'Не удалось скачать файл.'})
+                return
+
+            content = res['content']
+
+            # Read existing if present
+            backup_path = None
+            try:
+                if os.path.exists(self.local_path):
+                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    backup_path = f"{self.local_path}.bak.{ts}"
+                    # copy2 preserves metadata
+                    shutil.copy2(self.local_path, backup_path)
+            except Exception:
+                # If backup fails, continue but log
+                logging.exception('Не удалось создать бэкап локального файла')
+
+            # Write new file to a temp file then replace atomically
+            try:
+                fd, tmp = tempfile.mkstemp(suffix='.tmp', prefix='helper_', dir=os.path.dirname(self.local_path) or None, text=True)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                # Ensure safe replace using file_lock
+                with file_lock:
+                    os.replace(tmp, self.local_path)
+
+                self.done.emit({'ok': True, 'backup': backup_path, 'error': None})
+                return
+            except Exception as e:
+                logging.exception('Ошибка записи/замены файла')
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+                self.done.emit({'ok': False, 'backup': backup_path, 'error': str(e)})
+                return
+
+        except Exception as e:
+            logging.exception('Ошибка в DownloadReplaceThread')
+            self.done.emit({'ok': False, 'backup': None, 'error': str(e)})
 
 # animated decorative overlays
 class SnowEffectWidget(QWidget):
@@ -1293,6 +1407,8 @@ class MainWindow(QMainWindow):
         self.disable_editor_completely = False
         # GitHub repo для проверки обновлений (можно переопределить в настройках)
         self.github_repo = GITHUB_REPO
+        # Авто-проверка при старте (если False — автопроверка отключена, можно включить в настройках)
+        self.auto_check_on_start = True
         
         # Настройка логирования (вызов модульной функции напрямую для надежности)
         try:
@@ -1341,8 +1457,9 @@ class MainWindow(QMainWindow):
 
         # Авто-проверка обновлений при старте приложения — если конфигурация содержит корректный репозиторий
         try:
-            # запускаем в отдельном потоке, не блокируя UI
-            QTimer.singleShot(350, lambda: self._start_auto_update_check())
+            # запускаем в отдельном потоке, не блокируя UI, только если разрешено в настройках
+            if getattr(self, 'auto_check_on_start', True):
+                QTimer.singleShot(350, lambda: self._start_auto_update_check())
         except Exception:
             logging.exception('Не удалось запустить авто-проверку обновлений при старте')
     
@@ -1447,7 +1564,8 @@ class MainWindow(QMainWindow):
                         'allow_upload_without_ffmpeg': bool(getattr(self, 'allow_upload_without_ffmpeg', False)),
                         'disable_editor_completely': bool(getattr(self, 'disable_editor_completely', False)),
                         'default_privacy': str(getattr(self, 'default_privacy', 'private')),
-                        'github_repo': str(getattr(self, 'github_repo', GITHUB_REPO))
+                        'github_repo': str(getattr(self, 'github_repo', GITHUB_REPO)),
+                        'auto_check_on_start': bool(getattr(self, 'auto_check_on_start', True))
                     }
                     with open(temp_cfg.name, 'w', encoding='utf-8') as f:
                         json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -2184,6 +2302,26 @@ class MainWindow(QMainWindow):
                 check_update_btn.setStyleSheet("QPushButton { padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.06); }")
                 check_update_btn.clicked.connect(lambda: getattr(self, 'show_update_check', lambda: None)())
                 tl.addWidget(check_update_btn)
+                # Опция: авто-проверка при старте
+                try:
+                    auto_row = QWidget()
+                    ar_l = QHBoxLayout(auto_row)
+                    ar_l.setContentsMargins(0,0,0,0)
+                    ar_l.setSpacing(8)
+
+                    self.auto_check_checkbox = QCheckBox()
+                    self.auto_check_checkbox.setChecked(getattr(self, 'auto_check_on_start', True))
+                    self.auto_check_checkbox.toggled.connect(lambda v: self.on_toggle_auto_check(v))
+
+                    lbl_auto = QLabel('Авто-проверять обновления при старте')
+                    lbl_auto.setStyleSheet('color: white; font-size: 13px; padding: 6px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;')
+                    lbl_auto.mousePressEvent = lambda e, cb=self.auto_check_checkbox: cb.toggle()
+
+                    ar_l.addWidget(self.auto_check_checkbox, 0)
+                    ar_l.addWidget(lbl_auto, 1)
+                    tl.addWidget(auto_row)
+                except Exception:
+                    pass
                 # (Оставляем единственную кнопку проверки) — ввод репозитория убран (используется GITHUB_REPO или config.json)
                 # (default upload privacy selection removed from Settings UI; per-upload selection remains on Upload page)
             except Exception:
@@ -2541,9 +2679,16 @@ class MainWindow(QMainWindow):
                 self.default_privacy = str(cfg.get('default_privacy', getattr(self, 'default_privacy', 'private')))
                 # GitHub repo for updates (owner/repo)
                 self.github_repo = str(cfg.get('github_repo', getattr(self, 'github_repo', GITHUB_REPO)))
+                # auto-check flag
+                self.auto_check_on_start = bool(cfg.get('auto_check_on_start', getattr(self, 'auto_check_on_start', True)))
                 # если UI уже создан — применяем состояние чекбокса
                 try:
                     # (репозиторий для авто-проверки хранится в config.json или в GITHUB_REPO; UI поле удалено)
+                    try:
+                        if hasattr(self, 'auto_check_checkbox'):
+                            self.auto_check_checkbox.setChecked(bool(self.auto_check_on_start))
+                    except Exception:
+                        pass
                     if hasattr(self, 'allow_upload_checkbox'):
                         self.allow_upload_checkbox.setChecked(self.allow_upload_without_ffmpeg)
                     if hasattr(self, 'disable_editor_checkbox'):
@@ -2935,18 +3080,18 @@ class MainWindow(QMainWindow):
                 url = rel.get('html_url')
                 readable = rel.get('name') or tag or 'Новый релиз'
 
-                cmp = compare_versions(VERSION, _normalize_tag(tag))
+                cmp = compare_versions(APP_VERSION, _normalize_tag(tag))
                 if cmp < 0:
                     # найдена новая версия
-                    txt = f'Найдена новая версия: {tag}\n\nТекущая: {VERSION}\nРелиз: {readable}\n\nОткрыть страницу релиза?'
+                    txt = f'Найдена новая версия: {tag}\n\nТекущая: {APP_VERSION}\nРелиз: {readable}\n\nОткрыть страницу релиза?'
                     buttons = QMessageBox.Question
                     choice = QMessageBox.question(self, 'Доступно обновление', txt, QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel)
                     if choice == QMessageBox.StandardButton.Open and url:
                         webbrowser.open(url)
                 elif cmp == 0:
-                    QMessageBox.information(self, 'Проверка обновлений', f'У вас последняя версия ({VERSION}).')
+                    QMessageBox.information(self, 'Проверка обновлений', f'У вас последняя версия ({APP_VERSION}).')
                 else:
-                    QMessageBox.information(self, 'Проверка обновлений', f'Установлена бета/необычная версия ({VERSION}). GitHub latest: {tag}')
+                    QMessageBox.information(self, 'Проверка обновлений', f'Установлена бета/необычная версия ({APP_VERSION}). GitHub latest: {tag}')
 
             # запускаем в QThread
             try:
@@ -2975,12 +3120,12 @@ class MainWindow(QMainWindow):
                     rel = res['release']
                     tag = rel.get('tag_name')
                     url = rel.get('html_url')
-                    cmp = compare_versions(VERSION, _normalize_tag(tag))
+                    cmp = compare_versions(APP_VERSION, _normalize_tag(tag))
                     if cmp < 0:
                         # уведомляем пользователя — только если найдена новая версия
                         try:
                             # малое окно: спрашиваем — открыть релиз в браузере?
-                            txt = f'Доступна новая версия {tag} (текущая {VERSION}). Открыть страницу релиза?'
+                            txt = f'Доступна новая версия {tag} (текущая {APP_VERSION}). Открыть страницу релиза?'
                             choice = QMessageBox.question(self, 'Обновление доступно', txt, QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel)
                             if choice == QMessageBox.StandardButton.Open and url:
                                 webbrowser.open(url)
@@ -2990,10 +3135,106 @@ class MainWindow(QMainWindow):
                 except Exception:
                     logging.exception('Ошибка обработки результата авто-проверки')
 
-            # запускаем проверку в фоновом потоке
+            # запускаем проверку релиза в фоновом потоке
             t = ReleaseCheckThread(repo, parent=self)
             t.done.connect(on_done)
             t.start()
+
+            # также запускаем проверку содержимого файла youtube_uploader.py и сравниваем с локальной версией
+            try:
+                file_path = 'youtube_uploader.py'
+
+                def on_file_done(fr: dict):
+                    try:
+                        if not fr.get('ok') or not fr.get('file'):
+                            return
+                        remote = fr['file']
+                        remote_content = remote.get('content', '')
+                        # Read local file (this module's file)
+                        try:
+                            local_fn = os.path.abspath(__file__)
+                            with open(local_fn, 'r', encoding='utf-8') as f:
+                                local_content = f.read()
+                        except Exception:
+                            # fallback — try working dir
+                            try:
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    local_content = f.read()
+                            except Exception:
+                                return
+
+                        # Normalize newlines
+                        rc = remote_content.replace('\r\n', '\n')
+                        lc = local_content.replace('\r\n', '\n')
+
+                        if rc != lc:
+                            # файл отличается — предлагаем открыть страницу на GitHub, заменить или отменить
+                            try:
+                                txt = 'Файл youtube_uploader.py на GitHub отличается от локальной версии.'
+                                msg = QMessageBox(self)
+                                msg.setWindowTitle('Файл обновлён')
+                                msg.setText(txt)
+                                msg.setInformativeText('Открыть страницу, скачать и заменить локальную копию или отменить?')
+                                open_btn = msg.addButton('Открыть', QMessageBox.ButtonRole.ActionRole)
+                                replace_btn = msg.addButton('Заменить локально', QMessageBox.ButtonRole.AcceptRole)
+                                cancel_btn = msg.addButton('Отмена', QMessageBox.ButtonRole.RejectRole)
+                                msg.exec()
+
+                                clicked = msg.clickedButton()
+                                if clicked is open_btn:
+                                    url = remote.get('download_url') or f'https://github.com/{repo}/blob/main/{file_path}'
+                                    webbrowser.open(url)
+                                elif clicked is replace_btn:
+                                    # запуск замены в фоне
+                                    try:
+                                        local_fn = os.path.abspath(__file__)
+                                    except Exception:
+                                        local_fn = file_path
+
+                                    # Progress dialog
+                                    progress = QProgressDialog('Скачивание и замена файла...', 'Отмена', 0, 0, self)
+                                    progress.setWindowModality(Qt.WindowModality.WindowModal)
+                                    progress.setAutoClose(False)
+                                    progress.setCancelButtonText('Отмена')
+                                    progress.show()
+
+                                    def on_done_replace(dr: dict):
+                                        try:
+                                            try:
+                                                progress.close()
+                                            except Exception:
+                                                pass
+                                            if not dr.get('ok'):
+                                                QMessageBox.warning(self, 'Ошибка', f"Не удалось заменить файл: {dr.get('error')}")
+                                            else:
+                                                backup = dr.get('backup')
+                                                msg_text = 'Файл успешно заменён.'
+                                                if backup:
+                                                    msg_text += f' Бэкап сохранён: {backup}'
+                                                msg_text += '\n\nПерезапустите приложение, чтобы изменения вступили в силу.'
+                                                QMessageBox.information(self, 'Готово', msg_text)
+                                        except Exception:
+                                            logging.exception('Ошибка обработки результата замены')
+
+                                    try:
+                                        drt = DownloadReplaceThread(repo, file_path, local_fn, parent=self)
+                                        drt.done.connect(on_done_replace)
+                                        drt.start()
+                                    except Exception:
+                                        progress.close()
+                                        logging.exception('Не удалось запустить замену файла')
+
+                            except Exception:
+                                logging.exception('Ошибка показа диалога об отличии файла')
+
+                    except Exception:
+                        logging.exception('Ошибка обработки результата проверки файла')
+
+                ft = FileCheckThread(repo, 'youtube_uploader.py', parent=self)
+                ft.done.connect(on_file_done)
+                ft.start()
+            except Exception:
+                logging.exception('Не удалось запустить проверку файла на GitHub')
 
         except Exception:
             logging.exception('Не удалось выполнить авто-проверку обновлений')
@@ -3028,6 +3269,17 @@ class MainWindow(QMainWindow):
                 pass
         except Exception:
             logging.exception('Ошибка обновления allow_upload_without_ffmpeg')
+
+    def on_toggle_auto_check(self, enabled: bool):
+        """Handler for auto-check checkbox."""
+        try:
+            self.auto_check_on_start = bool(enabled)
+            try:
+                self._save_settings()
+            except Exception:
+                logging.exception('Не удалось сохранить настройку auto_check_on_start')
+        except Exception:
+            logging.exception('Ошибка обработки auto_check_on_start')
 
     
     def load_theme(self):
