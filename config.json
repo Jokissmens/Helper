@@ -1,0 +1,7 @@
+{
+  "allow_upload_without_ffmpeg": false,
+  "disable_editor_completely": false,
+  "default_privacy": "private",
+  "github_repo": "Jokissmens/Helper",
+  "auto_check_on_start": true
+}
